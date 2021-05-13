@@ -1,0 +1,69 @@
+from flask import Flask, request, redirect, url_for, flash, jsonify
+import numpy as np
+import torch
+from transformers import BertForSequenceClassification, BertTokenizer
+import joblib
+import boto3
+from io import BytesIO
+
+
+app = Flask(__name__)
+
+with BytesIO() as f:
+    boto3.client("s3").download_fileobj(Bucket='utter-beta', Key='ml/saved_models/tokenizer.joblib', Fileobj=f)
+    f.seek(0)
+    tokenizer = joblib.load(f)
+
+with BytesIO() as f:
+    boto3.client("s3").download_fileobj(Bucket='utter-beta', Key='ml/saved_models/model.joblib', Fileobj=f)
+    f.seek(0)
+    modelGED = joblib.load(f)
+
+modelGED.to("cpu")
+# saved_dir = '/server/model_art'       #directory where trained model is saved
+# # Load the BERT tokenizer and saved model.
+# tokenizer = BertTokenizer.from_pretrained(saved_dir)
+# modelGED = BertForSequenceClassification.from_pretrained(saved_dir)
+
+@app.route('/', methods=['GET'])
+def predict():
+    
+   
+    sent = request.args['sentence']
+
+    encoded_dict = tokenizer.encode_plus(
+                            sent,                      # Sentence to encode.
+                            add_special_tokens = True, # Add '[CLS]' and '[SEP]'
+                            max_length = 64,           # Pad & truncate all sentences.
+                            padding = 'max_length',
+                            return_attention_mask = True,   # Construct attn. masks.
+                            return_tensors = 'pt',     # Return pytorch tensors.
+                            truncation = True
+                       )
+
+    # Add the encoded sentence to the list.    
+    input_id = encoded_dict['input_ids']
+
+    # And its attention mask (simply differentiates padding from non-padding).
+    attention_mask = encoded_dict['attention_mask']
+
+    input_id = torch.LongTensor(input_id)
+    attention_mask = torch.LongTensor(attention_mask)
+
+    with torch.no_grad():
+      # Forward pass, calculate logit predictions
+      outputs = modelGED(input_id, token_type_ids=None, attention_mask=attention_mask)
+
+    logits = outputs[0][0]
+    prediction = logits.argmax()
+
+    exps = [np.exp(i) for i in logits]
+    sum_of_exps = sum(exps)
+    prob = [j/sum_of_exps for j in exps] 
+
+
+    return jsonify([int(prediction), round(float(prob[1]*100),2)])   
+
+        
+if __name__ == '__main__':
+  app.run()
